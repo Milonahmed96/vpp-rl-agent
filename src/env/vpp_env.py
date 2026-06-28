@@ -63,7 +63,16 @@ ACTION_TO_MW: dict[int, float] = {
 }
 
 # Default reward weights: profit, frequency penalty, degradation cost.
-DEFAULT_WEIGHTS: tuple[float, float, float] = (1.0, 0.5, 0.3)
+#
+# Rebalanced from the brief's (1.0, 0.5, 0.3). The brief computes degradation in
+# raw GBP (~37.5 per full action) but scales profit by /1000 (~0.75), so the
+# three reward terms are not commensurate. With w3=0.3 the degradation term
+# dwarfs profit and the frequency service (~1 at typical deviations) by ~50x,
+# and PPO rationally learns to always Hold. Lowering w3 to 0.01 puts degradation
+# on the same scale as profit and the frequency term, so the agent actively
+# trades. The frequency-stability sign behaviour is unchanged (and still covered
+# by the behavioural tests). Tune via VPPEnv(reward_weights=...).
+DEFAULT_WEIGHTS: tuple[float, float, float] = (1.0, 0.5, 0.01)
 
 _HALF_HOUR_FRACTION: float = 0.5
 _TERMINATION_BOUND_STEPS: int = 3
