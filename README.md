@@ -121,7 +121,7 @@ freq_penalty    = -Δf · a                            (positive ⇒ worsened fr
 degradation     = |a| · 1000 · 0.5 · 0.003           (£, throughput × cycle cost)
 
 reward          = w1·profit − w2·freq_penalty − w3·degradation
-                  with (w1, w2, w3) = (1.0, 0.5, 0.3)
+                  with (w1, w2, w3) = (1.0, 0.5, 0.01)
 ```
 
 **Sign convention.** Drawing power lowers grid frequency; injecting raises it.
@@ -175,11 +175,13 @@ rises when charging and falls when discharging.
   not a closed-loop response.
 - **Linear degradation model.** Battery wear is modelled as a flat £/kWh
   throughput cost, ignoring depth-of-discharge, temperature and calendar ageing.
-- **Reward scaling biases toward Hold.** Per the brief, profit is divided by
-  1000 while degradation is in raw £, so the degradation term dominates and the
-  PPO agent rationally converges to a near-Hold policy (backtest P&L ≈ 0). To
-  train an actively-trading agent, rebalance the weights (raise `w1`, lower
-  `w3`) or drop the profit `/1000` scaling.
+- **Reward-term commensurability.** The brief divides profit by 1000 but leaves
+  degradation in raw £, so the terms are on different scales. With the brief's
+  `w3 = 0.3` the degradation term dominated (~50×) and the agent learned to
+  always Hold. The default degradation weight is therefore rebalanced to
+  `w3 = 0.01` so the terms are comparable and the agent actively trades; the
+  weights remain tunable via `VPPEnv(reward_weights=...)`. A fuller fix would
+  express all three terms in a single, consistent unit.
 - **Synthetic fallback data.** Without a real merged dataset, training and the
   API loop use synthetic development data, which only approximates real
   market/grid dynamics.
