@@ -74,6 +74,62 @@ _REQUIRED_COLUMNS: tuple[str, ...] = (
 )
 
 
+def simulate_step(
+    action: int,
+    delta_f: float,
+    sbp: float,
+    ssp: float,
+    current_soc: float,
+    weights: tuple[float, float, float] = DEFAULT_WEIGHTS,
+) -> dict[str, float]:
+    """Compute the reward decomposition and SoC update for one action.
+
+    This pure function is the single source of truth for the dispatch economics,
+    shared by :meth:`VPPEnv.step` and the live API control loop.
+
+    Args:
+        action: ``0`` hold, ``1`` charge, ``2`` discharge.
+        delta_f: Frequency deviation from 50 Hz (Hz).
+        sbp: System buy price (GBP/MWh) - the discharge sell price.
+        ssp: System sell price (GBP/MWh) - the charge buy price.
+        current_soc: Fleet mean state of charge before the action.
+        weights: ``(w1, w2, w3)`` reward weights.
+
+    Returns:
+        Mapping with ``action_mw``, ``profit``, ``freq_penalty``,
+        ``degradation_cost``, ``reward``, ``new_soc`` and ``stabilising``.
+    """
+    action = int(action)
+    action_mw = ACTION_TO_MW[action]
+
+    # Charging (action_mw > 0) buys at SSP; discharging (< 0) sells at SBP.
+    price = ssp if action_mw > 0 else sbp
+    profit = -action_mw * price * _HALF_HOUR_FRACTION / 1000.0
+
+    # Frequency term: positive => agent worsened frequency (see module docstring).
+    freq_penalty = -delta_f * action_mw
+
+    energy_throughput_kwh = abs(action_mw) * 1000.0 * _HALF_HOUR_FRACTION
+    degradation_cost = energy_throughput_kwh * CYCLE_DEGRADATION_COST
+
+    w1, w2, w3 = weights
+    reward = w1 * profit - w2 * freq_penalty - w3 * degradation_cost
+
+    # Charging raises SoC; discharging lowers it.
+    delta_soc = action_mw * _HALF_HOUR_FRACTION / FLEET_CAPACITY_MWH
+    new_soc = float(np.clip(current_soc + delta_soc, MIN_SOC, MAX_SOC))
+
+    return {
+        "action_mw": action_mw,
+        "profit": profit,
+        "freq_penalty": freq_penalty,
+        "degradation_cost": degradation_cost,
+        "reward": reward,
+        "new_soc": new_soc,
+        "stabilising": float(freq_penalty < 0.0),
+    }
+
+
 class VPPEnv(gym.Env):
     """A single-step-per-period VPP dispatch environment.
 
@@ -161,7 +217,10 @@ class VPPEnv(gym.Env):
             A tuple ``(observation, info)``.
         """
         super().reset(seed=seed)
-        if self._mode == "train":
+        if options and "start_index" in options:
+            # Explicit start (used by the backtest to sweep the held-out tail).
+            self._index = int(np.clip(options["start_index"], 0, self._n - 1))
+        elif self._mode == "train":
             high = max(1, self._split_index - self._max_episode_steps)
             self._index = int(self.np_random.integers(0, high))
         else:
@@ -182,37 +241,22 @@ class VPPEnv(gym.Env):
             ``(observation, reward, terminated, truncated, info)``.
         """
         action = int(action)
-        action_mw = ACTION_TO_MW[action]
         idx = self._index
 
-        delta_f = float(self._delta_f[idx])
-        sbp = float(self._sbp[idx])
-        ssp = float(self._ssp[idx])
-
-        # --- Profit (GBP, scaled per brief by 0.5h and /1000) ------------- #
-        # Charging (action_mw > 0) buys energy at the system sell price (SSP);
-        # discharging (action_mw < 0) sells energy at the system buy price (SBP).
-        price = ssp if action_mw > 0 else sbp
-        profit = -action_mw * price * _HALF_HOUR_FRACTION / 1000.0
-
-        # --- Frequency stability term ------------------------------------- #
-        # See module docstring: positive => agent worsened frequency.
-        freq_penalty = -delta_f * action_mw
-
-        # --- Degradation cost (GBP) --------------------------------------- #
-        energy_throughput_kwh = abs(action_mw) * 1000.0 * _HALF_HOUR_FRACTION
-        degradation_cost = energy_throughput_kwh * CYCLE_DEGRADATION_COST
-
-        reward = (
-            self._w1 * profit - self._w2 * freq_penalty - self._w3 * degradation_cost
+        outcome = simulate_step(
+            action,
+            delta_f=float(self._delta_f[idx]),
+            sbp=float(self._sbp[idx]),
+            ssp=float(self._ssp[idx]),
+            current_soc=self.current_soc,
+            weights=(self._w1, self._w2, self._w3),
         )
-
-        # --- State-of-charge update --------------------------------------- #
-        # Charging (action_mw > 0) raises SoC; discharging lowers it.
-        delta_soc = action_mw * _HALF_HOUR_FRACTION / FLEET_CAPACITY_MWH
-        self.current_soc = float(
-            np.clip(self.current_soc + delta_soc, MIN_SOC, MAX_SOC)
-        )
+        action_mw = outcome["action_mw"]
+        profit = outcome["profit"]
+        freq_penalty = outcome["freq_penalty"]
+        degradation_cost = outcome["degradation_cost"]
+        reward = outcome["reward"]
+        self.current_soc = outcome["new_soc"]
 
         # --- Termination / truncation ------------------------------------- #
         at_bound = self.current_soc in (MIN_SOC, MAX_SOC)

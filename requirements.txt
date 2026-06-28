@@ -11,3 +11,4 @@ python-dotenv>=1.0
 pydantic>=2.7
 apscheduler>=3.10
 scikit-learn>=1.4
+tensorboard>=2.16
